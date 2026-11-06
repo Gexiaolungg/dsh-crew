@@ -4,27 +4,81 @@
 
 import { readGlobalConfig } from './install/install.mjs';
 import { pluginEnv } from './plugin-env.mjs';
+import { findDesktopHubUrls } from './desktop-hub.mjs';
 
-const BASE = (pluginEnv('CREW_HUB') ?? readGlobalConfig().hub_url).replace(/\/$/, '');
-const API = `${BASE}/_dsh/dsh-crew`;
+const ROUTE = '/_dsh/dsh-crew';
+const HUB_CACHE_MS = 1000;
 
-let lastProbe = { at: 0, ok: false };
+export function createHubResolver({ preferredUrl, desktopUrls, request = fetch, now = Date.now }) {
+  const preferred = preferredUrl.replace(/\/+$/, '');
+  let current = null;
+  let checkedAt = -Infinity;
+  let pending;
 
-export async function hubAvailable() {
-  if (Date.now() - lastProbe.at < 10_000) return lastProbe.ok;
-  try {
-    const res = await fetch(`${API}/ping`, { signal: AbortSignal.timeout(800) });
-    const body = await res.json();
-    lastProbe = { at: Date.now(), ok: res.ok && body?.service === 'dsh-crew-hub' };
-  } catch {
-    lastProbe = { at: Date.now(), ok: false };
+  async function responds(url) {
+    if (!url) return false;
+    try {
+      const res = await request(url + ROUTE + '/ping', {
+        signal: AbortSignal.timeout(800),
+        redirect: 'error',
+      });
+      return res.ok && (await res.json()).service === 'dsh-crew-hub';
+    } catch {
+      return false;
+    }
   }
-  return lastProbe.ok;
+
+  async function discover() {
+    // Keep using a healthy Hub if another local instance comes online.
+    if (await responds(current)) return current;
+    if (preferred !== current && await responds(preferred)) return preferred;
+    for (const candidate of await desktopUrls()) {
+      if (candidate !== current && candidate !== preferred && await responds(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  return {
+    async resolve() {
+      if (pending) return pending;
+      if (now() - checkedAt < HUB_CACHE_MS) return current;
+      pending = discover().then((url) => {
+        current = url;
+        checkedAt = now();
+        return url;
+      }).finally(() => { pending = undefined; });
+      return pending;
+    },
+    invalidate(url) {
+      if (current === url) checkedAt = -Infinity;
+    },
+  };
+}
+
+const override = pluginEnv('CREW_HUB');
+const resolver = createHubResolver({
+  preferredUrl: override ?? readGlobalConfig().hub_url,
+  desktopUrls: override === undefined ? findDesktopHubUrls : async () => [],
+});
+export const resolveHubUrl = resolver.resolve;
+export async function hubAvailable() {
+  return Boolean(await resolveHubUrl());
 }
 
 async function call(path, init) {
-  const res = await fetch(`${API}${path}`, init);
-  const body = await res.json();
+  const url = await resolveHubUrl();
+  if (!url) throw new Error('DSH workers hub is not reachable');
+  let res, body;
+  try {
+    res = await fetch(url + ROUTE + path, { ...init, redirect: 'error' });
+    body = await res.json();
+  } catch (err) {
+    // Rediscover on a subsequent call. A POST may already have been accepted.
+    resolver.invalidate(url);
+    throw err;
+  }
   if (!res.ok || body.ok === false) throw new Error(body.error ?? `hub request failed (${res.status})`);
   return body;
 }

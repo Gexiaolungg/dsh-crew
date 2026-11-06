@@ -9,7 +9,7 @@
 //      @deepseek-ai/* package into node_modules (@deepseek-ai/* is host
 //      runtime only - the DSH host provides it, plain npm never must);
 //   4. both src/server.mjs and lib/server.mjs must answer initialize +
-//      tools/list with the full 6-tool roster and matching versions.
+//      tools/list with the full tool roster and matching versions.
 //
 // Why this exists: rc.1/rc.2 declared the whole @deepseek-ai/* stack as
 // REQUIRED peerDependencies. npm 7+ auto-installs peers, and the pinned
@@ -33,9 +33,10 @@
 // the last gate before publishing.
 
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -102,9 +103,22 @@ function run(cmd, args, { cwd, timeoutMs = 300_000, env = {} } = {}) {
   } catch (err) {
     const tail = (s) => (s || '').slice(-4000);
     fail(cmd + ' ' + args.join(' ') + ' failed in ' + cwd +
+      '\n' + err.message +
       '\n--- stdout tail ---\n' + tail(err.stdout) +
       '\n--- stderr tail ---\n' + tail(err.stderr));
   }
+}
+
+function runNpm(args, options) {
+  if (process.platform !== 'win32') return run('npm', args, options);
+  // Windows installs npm as a .cmd shim, which execFile cannot run directly.
+  // Use Node to launch npm's JS entry even if this script was run via pnpm.
+  const invokingCli = process.env.npm_execpath ?? '';
+  const npmCli = basename(invokingCli) === 'npm-cli.js'
+    ? invokingCli
+    : join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  if (!existsSync(npmCli)) fail('Cannot locate npm-cli.js. Run this check with npm run smoke:pack.');
+  return run(process.execPath, [npmCli, ...args], options);
 }
 
 async function handshake(serverRel, label) {
@@ -181,7 +195,9 @@ async function handshake(serverRel, label) {
   console.log('[' + label + '] OK: ' + names.length + ' tools, serverInfo=' + JSON.stringify(info));
 
   finished = true;
+  const closed = once(child, 'close');
   child.kill();
+  await closed;
   child = null;
   return info;
 }
@@ -197,7 +213,7 @@ tempDirs.push(packDir);
 // which would fail this test with EPERM instead of testing the tarball.
 const cacheDir = mkdtempSync(join(tmpdir(), 'dsh-crew-npm-cache-'));
 tempDirs.push(cacheDir);
-const packOut = run('npm', ['pack', '--cache', cacheDir, '--pack-destination', packDir], { cwd: ROOT, env: { npm_config_cache: cacheDir } });
+const packOut = runNpm(['pack', '--cache', cacheDir, '--pack-destination', packDir], { cwd: ROOT, env: { npm_config_cache: cacheDir } });
 console.log(packOut.split('\n').slice(-6).join('\n'));
 const tarballs = readdirSync(packDir).filter((f) => f.endsWith('.tgz'));
 if (tarballs.length !== 1) fail('expected exactly one tarball in ' + packDir + ', found ' + JSON.stringify(tarballs));
@@ -210,8 +226,8 @@ console.log('[smoke:pack] tarball: ' + tarballPath + ' (' + statSync(tarballPath
 console.log('\n[smoke:pack] 2/5 npm init -y && npm i ' + tarballPath);
 const installDir = mkdtempSync(join(tmpdir(), 'dsh-crew-install-'));
 tempDirs.push(installDir);
-console.log(run('npm', ['init', '-y', '--cache', cacheDir], { cwd: installDir, env: { npm_config_cache: cacheDir } }).split('\n').slice(0, 3).join('\n'));
-const installOut = run('npm', ['i', tarballPath, '--cache', cacheDir], { cwd: installDir, timeoutMs: 600_000, env: { npm_config_cache: cacheDir } });
+console.log(runNpm(['init', '-y', '--cache', cacheDir], { cwd: installDir, env: { npm_config_cache: cacheDir } }).split('\n').slice(0, 3).join('\n'));
+const installOut = runNpm(['i', tarballPath, '--cache', cacheDir], { cwd: installDir, timeoutMs: 600_000, env: { npm_config_cache: cacheDir } });
 console.log(installOut.split('\n').slice(-12).join('\n'));
 if (/ERESOLVE/.test(installOut)) fail('npm i printed ERESOLVE - optional peers are still being auto-installed');
 

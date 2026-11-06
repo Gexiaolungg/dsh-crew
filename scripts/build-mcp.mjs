@@ -1,6 +1,6 @@
 // Builds lib/server.mjs: a self-contained bundle of the MCP stdio server.
-// Only the third-party packages the MCP protocol itself needs - the MCP SDK
-// and zod - are inlined, so the published plugin works from a plain
+// The third-party packages used by the MCP entry point are inlined,
+// so the published plugin works from a plain
 // directory copy with no node_modules (Claude Code's directory marketplace
 // copies the repo without installing anything, and a bundled file needs no
 // install step).

@@ -169,7 +169,7 @@ smoke 测试会挑一条可用的路径派一个廉价任务——DSH 实例在�
 
 ```bash
 node src/install/cli.mjs claude   # Claude Code 插件：marketplace + 权限白名单 + HUD 状态段
-node src/install/cli.mjs codex    # Codex agent + prompt
+node src/install/cli.mjs codex    # Codex MCP、角色与 prompt
 node src/install/cli.mjs agy      # Antigravity MCP 配置 + agent + skill
 node src/install/cli.mjs grok     # Grok MCP 配置 + agent + 命令
 node src/install/cli.mjs all      # 四个宿主一次装齐
@@ -222,25 +222,15 @@ node src/install/cli.mjs uninstall-claude
 
 ### 安装
 
-推荐用安装器（自动按本机路径渲染，并复制 `/dsh-config`、`/dsh-status`、`/dsh-playbook` prompt）：
+用安装器把 DSH Crew MCP 注册到 Codex 主配置，同时安装 `ds-flash`、`ds-pro` 角色和相关 prompt。
 
 ```bash
 node src/install/cli.mjs codex
 ```
 
-或手工复制（复制后需自行修改路径）：
+安装后重启 Codex。两个角色会继承主会话的模型和 MCP 服务器。安装器优先使用 `$CODEX_HOME`，默认使用 `~/.codex`。加 `--project` 可安装到受信任项目的 `.codex` 目录。
 
-```bash
-cp codex/agents/*.toml ~/.codex/agents/    # 全局或项目级 .codex/agents/
-```
-
-角色文件内已预配：
-
-- MCP server 挂载配置
-- `default_tools_approval_mode = "approve"`（**必须**，否则 exec 模式下工具调用被自动取消）
-- `tool_timeout_sec = 3600`
-
-**注意**：手工复制时，role 文件中 `args` 的绝对路径需按实际安装位置修改；用安装器则无需手改。
+安装器为 DSH Crew 单独设置 `default_tools_approval_mode = "approve"` 和 `tool_timeout_sec = 3600`。已有的手工配置会保留。卸载时运行 `node src/install/cli.mjs uninstall-codex`，项目级安装加 `--project`。
 
 ### 使用
 
@@ -411,7 +401,7 @@ node src/install/cli.mjs grok
   - `POST/GET /_dsh/dsh-crew/jobs`：spawn 任务、列表、长轮询结果、cancel
   - `GET /_dsh/dsh-crew/ping`：健康探测（MCP shim 靠它判断 hub 是否在跑）
   - `POST /_dsh/dsh-crew/install`：一键安装宿主集成——Claude Code / Codex / Antigravity / Grok（即 `src/install/` 的后端）
-- **自动探测**：各宿主的 MCP shim 自动探测 hub（`DSHPLUGIN_CREW_HUB` 环境变量，默认 `http://127.0.0.1:3080`）
+- MCP 先检查配置中的 Hub，默认地址为 `http://127.0.0.1:3080`。在 Windows 上，如果该地址不可达，MCP 会检查 DSH 桌面版的本机监听地址，并在桌面端重启后重新发现端口。可用 `DSHPLUGIN_CREW_HUB` 固定目标 Hub。
   - DSH Web 在跑 → job 进 hub 模式（`mode: "hub"`）
   - 没跑 → 回落 standalone runtime
 
@@ -442,8 +432,8 @@ node src/install/cli.mjs grok
 
 - Codex 角色理论上可试 `model_provider` 直指 DeepSeek（未验证）；本桥不依赖它
 - 生图输出为平面位图，需要分层编辑用 OpenPencil
-- **运行时依赖**：仅 `@modelcontextprotocol/sdk` 与 `zod`；`@deepseek-ai/*` 是宿主运行时（由 DSH 宿主提供，普通 npm 安装不会拉取它们）
-- **Codex 必须配置**：`default_tools_approval_mode = "approve"`，否则工具调用被自动取消
+- 运行时依赖包括 `@modelcontextprotocol/sdk`、`zod` 和 `smol-toml`。DSH 提供 `@deepseek-ai/*` 宿主运行时。
+- 手工配置 Codex 时，把 MCP 服务器及其工具审批设置写到主会话的 `config.toml`，供子代理继承。
 
 ## 开发
 
@@ -455,7 +445,7 @@ node scripts/build-client.mjs   # 把 bundle 包装成 DSH 模块加载器格式
 node scripts/smoke.mjs          # 真实派发一个 flash 任务做端到端自检
 ```
 
-运行时依赖只有 `@modelcontextprotocol/sdk` 与 `zod`；所有 `@deepseek-ai/*` 都是宿主运行时，由 DSH 宿主提供（记录在 package.json 的 dshHostRuntime 字段，而非 peerDependencies，普通 npm 安装不会拉取它们）——这样插件才留在宿主的单一模块 realm 里。
+`dshHostRuntime` 列出的 `@deepseek-ai/*` 包由 DSH 提供，插件与宿主共用同一个模块环境。
 
 ## 生态
 

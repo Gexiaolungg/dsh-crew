@@ -1,75 +1,94 @@
-// The TOML the installers write must parse (#12).
-//
-// A Windows install path placed raw between double quotes is not TOML:
-// `C:\Users\...` opens a `\U` unicode escape and `\node_modules` a `\n`, so
-// grok refused to start ("too few unicode value digits"). The check parses
-// with a real TOML parser (Python's tomllib) rather than comparing strings,
-// since a string comparison would only restate the quoting rule under test.
-
+// The installers must write valid TOML even when Windows paths need escaping.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse as parseToml } from 'smol-toml';
 
-const PY_PARSE = 'import sys, json, tomllib; print(json.dumps(tomllib.loads(sys.stdin.read())))';
-
-function parseToml(text) {
-  const r = spawnSync('python3', ['-c', PY_PARSE], { input: text, encoding: 'utf8' });
-  if (r.error || r.status !== 0) {
-    return { ok: false, error: (r.stderr || String(r.error)).trim() };
-  }
-  return { ok: true, value: JSON.parse(r.stdout) };
-}
-
-const hasTomllib = spawnSync('python3', ['-c', 'import tomllib'], { encoding: 'utf8' }).status === 0;
-
-// The installer migrates ~/.config at import time; keep that off the real home.
 let home;
 let install;
 before(async () => {
   home = mkdtempSync(join(tmpdir(), 'dsh-crew-toml-'));
-  process.env.HOME = home;
+  // The installer migrates ~/.config at import time; use the fixture home.
+  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
   install = await import('../src/install/install.mjs');
 });
 
-test('a Windows path survives the round trip', { skip: !hasTomllib && 'python3 tomllib unavailable' }, () => {
-  const path = 'C:\\Users\\kk\\.dsh\\profiles\\web\\node_modules\\@zseven-w\\dsh-crew\\lib\\server.mjs';
-
-  // The shape that shipped: rejected by the parser.
-  assert.equal(parseToml(`args = ["${path}"]\n`).ok, false);
-
-  const parsed = parseToml(`args = [${install.tomlString(path)}]\n`);
-  assert.ok(parsed.ok, parsed.error);
-  assert.deepEqual(parsed.value.args, [path]);
+test('a Windows path survives the round trip', () => {
+  const path = 'C:\\Users\\kk\\node_modules\\dsh-crew\\server.mjs';
+  assert.throws(() => parseToml('args = ["' + path + '"]\n'));
+  assert.deepEqual(parseToml('args = [' + install.tomlString(path) + ']\n').args, [path]);
 });
 
-test('quotes and control characters survive the round trip', { skip: !hasTomllib && 'python3 tomllib unavailable' }, () => {
-  for (const path of [`C:\\Users\\O'Brien\\x`, '/home/a "b"/x', 'C:\\tab\there', 'del\x7fchar']) {
-    const parsed = parseToml(`v = ${install.tomlString(path)}\n`);
-    assert.ok(parsed.ok, `${JSON.stringify(path)}: ${parsed.error}`);
-    assert.equal(parsed.value.v, path);
+test('quotes and control characters survive the round trip', () => {
+  for (const path of ["C:\\Users\\O'Brien\\x", '/home/a "b"/x', 'C:\\tab\\there', 'del\x7fchar']) {
+    assert.equal(parseToml('v = ' + install.tomlString(path) + '\n').v, path);
   }
 });
 
-test('installGrok writes a config.toml that parses', { skip: !hasTomllib && 'python3 tomllib unavailable' }, () => {
+test('installGrok writes a config.toml that parses', () => {
   const result = install.installGrok({ home });
   assert.ok(result.ok);
-  const parsed = parseToml(readFileSync(join(home, '.grok', 'config.toml'), 'utf8'));
-  assert.ok(parsed.ok, parsed.error);
-  const server = parsed.value.mcp_servers['dsh-crew'];
+  const config = parseToml(readFileSync(join(home, '.grok', 'config.toml'), 'utf8'));
+  const server = config.mcp_servers['dsh-crew'];
   assert.equal(server.command, 'node');
   assert.match(server.args[0], /server\.mjs$/);
 });
 
-test('installCodex writes agent roles that parse', { skip: !hasTomllib && 'python3 tomllib unavailable' }, () => {
+test('Codex install and uninstall manage the parent MCP and preserve unrelated config', () => {
+  const codex = join(home, '.codex');
+  const configPath = join(codex, 'config.toml');
+  const existing = '# My settings\r\nmodel = "my-model"\r\n\r\n[mcp_servers.existing]\r\ncommand = "other"\r\n';
+  mkdirSync(codex);
+  writeFileSync(configPath, existing);
+
   install.installCodex({ home });
-  for (const f of ['ds-flash.toml', 'ds-pro.toml']) {
-    const parsed = parseToml(readFileSync(join(home, '.codex', 'agents', f), 'utf8'));
-    assert.ok(parsed.ok, `${f}: ${parsed.error}`);
-    assert.match(parsed.value.mcp_servers['dsh-crew'].args[0], /server\.mjs$/);
+  const installed = readFileSync(configPath, 'utf8');
+  assert.ok(installed.startsWith(existing));
+  const server = parseToml(installed).mcp_servers['dsh-crew'];
+  assert.equal(server.command, process.execPath);
+  assert.match(server.args[0], /server\.mjs$/);
+  assert.equal(server.default_tools_approval_mode, 'approve');
+  for (const name of ['ds-flash', 'ds-pro']) {
+    const role = parseToml(readFileSync(join(codex, 'agents', name + '.toml'), 'utf8'));
+    assert.equal(role.name, name);
+    assert.equal(role.model, undefined);
+    assert.equal(role.mcp_servers, undefined);
   }
+  assert.equal(install.installStatus({ home }).codex.installed, true);
+
+  const filesBeforeReinstall = readdirSync(codex);
+  install.installCodex({ home });
+  assert.equal(readFileSync(configPath, 'utf8'), installed);
+  assert.deepEqual(readdirSync(codex), filesBeforeReinstall);
+
+  install.uninstallCodex({ home });
+  assert.equal(readFileSync(configPath, 'utf8'), existing);
+  assert.equal(install.installStatus({ home }).codex.installed, false);
+});
+
+test('Codex install and uninstall preserve a user-owned server entry', () => {
+  const configPath = join(home, '.codex', 'config.toml');
+  const custom = [
+    '[mcp_servers."dsh-crew"]',
+    'command = "custom-launcher"',
+    '[mcp_servers."dsh-crew".env]',
+    'DSHPLUGIN_CREW_HUB = "http://127.0.0.1:3120"',
+    '',
+  ].join('\n');
+  writeFileSync(configPath, custom);
+  assert.match(install.installCodex({ home }).actions.join('\n'), /user-managed/);
+  install.uninstallCodex({ home });
+  assert.equal(readFileSync(configPath, 'utf8'), custom);
+});
+
+test('Codex installer leaves invalid configuration untouched', () => {
+  const configPath = join(home, '.codex', 'config.toml');
+  const invalid = '[mcp_servers.existing\n';
+  writeFileSync(configPath, invalid);
+  assert.throws(() => install.installCodex({ home }));
+  assert.equal(readFileSync(configPath, 'utf8'), invalid);
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));

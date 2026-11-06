@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // ---------- D1 (P4): agy image-gen must not report success on an unverified file ----------
-test('generate_image(provider=agy) refuses when no nonce-matching image exists (no false success)', async () => {
+test('generate_image(provider=agy) refuses when no nonce-matching image exists (no false success)', {
+  skip: process.platform === 'win32' && 'the fake agy executable is a POSIX shell script',
+}, async () => {
   const work = mkdtempSync(join(tmpdir(), 'agy-guard-'));
   const home = join(work, 'home');
   const bin = join(work, 'bin');

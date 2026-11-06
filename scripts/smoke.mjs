@@ -2,14 +2,11 @@
 // Probes the hub first (if DSH web instance is running); falls back to
 // standalone mode. Always exercises the path the user actually installed.
 
-import { hubAvailable, hub } from '../src/hub-client.mjs';
-import { readGlobalConfig } from '../src/install/install.mjs';
+import { resolveHubUrl, hub } from '../src/hub-client.mjs';
 
 try {
-  const hubUrl = process.env.DSHPLUGIN_CREW_HUB ?? process.env.DSH_CREW_HUB ?? readGlobalConfig().hub_url;
-  const isHubUp = await hubAvailable();
-
-  if (isHubUp) {
+  const hubUrl = await resolveHubUrl();
+  if (hubUrl) {
     // Dispatch through the hub
     console.log(`hub at ${hubUrl} is reachable, using hub mode`);
     const job = await hub.spawn({
@@ -36,7 +33,7 @@ try {
     }
   } else {
     // Fall back to standalone mode
-    console.log(`no hub at ${hubUrl}, falling back to standalone mode`);
+    console.log('no reachable hub, falling back to standalone mode');
 
     try {
       const { startJob, waitJob, jobView } = await import('../src/jobs.mjs');

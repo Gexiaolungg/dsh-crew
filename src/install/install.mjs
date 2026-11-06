@@ -2,15 +2,20 @@
 // render Codex / agy / grok agent roles with real paths. Called from the CLI
 // entry or the DSH settings page. All edits are backed up and idempotent.
 
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, readdirSync, rmSync, rmdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, readdirSync, renameSync, rmSync, rmdirSync } from 'node:fs';
 import { dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { parse as parseToml } from 'smol-toml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MARKETPLACE_NAME = 'dsh-crew';
 const PLUGIN_KEY = `dsh-crew@${MARKETPLACE_NAME}`;
 const MCP_TOOLS = ['dsh_run_worker', 'dsh_spawn_worker', 'dsh_worker_status', 'dsh_worker_result', 'dsh_worker_cancel'];
+const CODEX_MCP_BEGIN = '# BEGIN DSH Crew managed MCP';
+const CODEX_MCP_END = '# END DSH Crew managed MCP';
+const CODEX_MCP_BLOCK = /^# BEGIN DSH Crew managed MCP\r?\n\[mcp_servers\.dsh-crew\]\r?\n[\s\S]*?^# END DSH Crew managed MCP(?:\r?\n|$)/m;
 
 function backup(file) {
   if (existsSync(file)) {
@@ -62,7 +67,6 @@ try {
   const oldDir = join(homedir(), '.config', 'dsh-workers');
   const newDir = join(homedir(), '.config', 'dsh-crew');
   if (existsSync(oldDir) && !existsSync(newDir)) {
-    const { renameSync } = await import('node:fs');
     renameSync(oldDir, newDir);
   }
 } catch {}
@@ -125,14 +129,90 @@ export function writeGlobalConfig(patch) {
   return next;
 }
 
+function codexDir(home, scope) {
+  if (scope === 'project') return join(process.cwd(), '.codex');
+  if (home !== undefined) return join(home, '.codex');
+  return resolve(process.env.CODEX_HOME || join(homedir(), '.codex'));
+}
+
+function readCodexConfig(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return '';
+    throw err;
+  }
+}
+
+function codexMcp(config) {
+  return parseToml(config).mcp_servers?.['dsh-crew'];
+}
+
+function editCodexMcp(file, actions, install) {
+  const previous = readCodexConfig(file);
+  const existing = codexMcp(previous);
+  let rest = previous;
+  if (existing && CODEX_MCP_BLOCK.test(previous)) {
+    const candidate = previous.replace(CODEX_MCP_BLOCK, '');
+    // A matching pair of markers inside a multiline TOML string does not
+    // own the server declared elsewhere in the config.
+    if (!codexMcp(candidate)) rest = candidate;
+  }
+  if (existing && rest === previous) {
+    actions.push('mcp: existing user-managed dsh-crew entry preserved');
+    return;
+  }
+
+  const eol = previous.includes('\r\n') ? '\r\n' : '\n';
+  let next = rest;
+  if (install) {
+    if (next && !next.endsWith('\n')) next += eol;
+    next += [
+      CODEX_MCP_BEGIN,
+      '[mcp_servers.dsh-crew]',
+      'command = ' + tomlString(process.execPath),
+      'args = [' + tomlString(join(ROOT, 'src', 'server.mjs')) + ']',
+      'default_tools_approval_mode = "approve"',
+      'tool_timeout_sec = 3600',
+      CODEX_MCP_END,
+      '',
+    ].join(eol);
+  }
+  if (next === previous) return;
+  // Validate the merged file before changing it (for example, an inline
+  // mcp_servers table cannot be extended with a new TOML table).
+  parseToml(next);
+  mkdirSync(dirname(file), { recursive: true });
+  const bak = backup(file);
+  if (bak) actions.push('backup: ' + bak);
+  const temp = file + '.dsh-crew-' + randomUUID() + '.tmp';
+  try {
+    writeFileSync(temp, next, { mode: 0o600, flag: 'wx' });
+    if (readCodexConfig(file) !== previous) {
+      throw new Error('Codex configuration changed during setup. Run the installer again.');
+    }
+    renameSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+  actions.push('mcp: ' + (install ? 'registered' : 'removed') + ' dsh-crew in ' + file);
+}
+
 /** What is currently installed where — drives the settings-page buttons. */
-export function installStatus({ home = homedir() } = {}) {
+export function installStatus({ home } = {}) {
+  const codex = codexDir(home);
+  home ??= homedir();
   const settings = readJson(join(home, '.claude', 'settings.json'), {});
   const enabled = settings.enabledPlugins;
   const claudeInstalled = !!(enabled && !Array.isArray(enabled) && enabled[PLUGIN_KEY]);
   const hudWired = typeof settings.statusLine?.command === 'string'
     && settings.statusLine.command.includes('worker-segment.sh');
-  const codexInstalled = existsSync(join(home, '.codex', 'agents', 'ds-flash.toml'));
+  let codexInstalled = false;
+  try {
+    const server = codexMcp(readCodexConfig(join(codex, 'config.toml')));
+    codexInstalled = !!server && server.enabled !== false && ['ds-flash.toml', 'ds-pro.toml']
+      .every((name) => existsSync(join(codex, 'agents', name)));
+  } catch { /* An unreadable Codex config must not hide other host statuses. */ }
   const agyMcp = readJson(join(home, '.gemini', 'config', 'mcp_config.json'), {});
   const agyInstalled = !!(agyMcp.mcpServers && agyMcp.mcpServers['dsh-crew'])
     || existsSync(join(home, '.gemini', 'config', 'agents', 'ds-flash.md'));
@@ -147,15 +227,17 @@ export function installStatus({ home = homedir() } = {}) {
   };
 }
 
-export function uninstallCodex({ home = homedir() } = {}) {
+export function uninstallCodex({ home, scope } = {}) {
   const actions = [];
+  const codex = codexDir(home, scope);
+  editCodexMcp(join(codex, 'config.toml'), actions, false);
   for (const f of ['ds-flash.toml', 'ds-pro.toml']) {
-    const p = join(home, '.codex', 'agents', f);
+    const p = join(codex, 'agents', f);
     if (existsSync(p)) { backup(p); rmSync(p); actions.push(`removed: ${p} (backup kept)`); }
   }
   for (const f of ['dsh-config.md', 'dsh-status.md', 'dsh-playbook.md']) {
-    const p = join(home, '.codex', 'prompts', f);
-    if (existsSync(p)) { rmSync(p); actions.push(`removed: ${p}`); }
+    const p = join(codex, 'prompts', f);
+    if (existsSync(p)) { backup(p); rmSync(p); actions.push('removed: ' + p + ' (backup kept)'); }
   }
   return { ok: true, actions: actions.length ? actions : ['nothing to remove'] };
 }
@@ -258,28 +340,25 @@ export async function installClaudeCode({ home = homedir(), statusline = false }
   return { ok: true, actions };
 }
 
-export function installCodex({ home = homedir(), scope } = {}) {
+export function installCodex({ home, scope } = {}) {
   const actions = [];
-  const agentsDir = scope === 'project' ? join(process.cwd(), '.codex', 'agents') : join(home, '.codex', 'agents');
-  mkdirSync(agentsDir, { recursive: true });
-  const srcDir = join(ROOT, 'codex', 'agents');
-  for (const f of readdirSync(srcDir).filter((f) => f.endsWith('.toml'))) {
-    const dest = join(agentsDir, f);
-    const bak = backup(dest);
-    if (bak) actions.push(`backup: ${bak}`);
-    const rendered = readFileSync(join(srcDir, f), 'utf8')
-      .replace(/args = \[.*server\.mjs"\]/, () => `args = [${tomlString(join(ROOT, 'src', 'server.mjs'))}]`);
-    writeFileSync(dest, rendered);
-    actions.push(`role: ${dest}`);
+  const codex = codexDir(home, scope);
+  editCodexMcp(join(codex, 'config.toml'), actions, true);
+  for (const [directory, suffix] of [['agents', '.toml'], ['prompts', '.md']]) {
+    const source = join(ROOT, 'codex', directory);
+    const destDir = join(codex, directory);
+    mkdirSync(destDir, { recursive: true });
+    for (const name of readdirSync(source).filter((name) => name.endsWith(suffix))) {
+      const content = readFileSync(join(source, name), 'utf8');
+      const dest = join(destDir, name);
+      if (readText(dest) === content) continue;
+      const bak = backup(dest);
+      if (bak) actions.push('backup: ' + bak);
+      writeFileSync(dest, content);
+      actions.push(directory + ': ' + dest);
+    }
   }
-  const promptsDir = scope === 'project' ? join(process.cwd(), '.codex', 'prompts') : join(home, '.codex', 'prompts');
-  mkdirSync(promptsDir, { recursive: true });
-  const promptsSrc = join(ROOT, 'codex', 'prompts');
-  for (const f of readdirSync(promptsSrc).filter((f) => f.endsWith('.md'))) {
-    writeFileSync(join(promptsDir, f), readFileSync(join(promptsSrc, f), 'utf8'));
-    actions.push(`prompt: ${join(promptsDir, f)}`);
-  }
-  return { ok: true, actions };
+  return { ok: true, actions: actions.length ? actions : ['Codex integration already up to date'] };
 }
 
 // ---------- agy (Antigravity CLI) ----------

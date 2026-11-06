@@ -169,7 +169,7 @@ Then open Settings → DSH Crew and install the host integrations — Claude Cod
 
 ```bash
 node src/install/cli.mjs claude   # Claude Code plugin: marketplace + permissions + HUD segment
-node src/install/cli.mjs codex    # Codex agents + prompts
+node src/install/cli.mjs codex    # Codex MCP + agents + prompts
 node src/install/cli.mjs agy      # Antigravity MCP config + agents + skills
 node src/install/cli.mjs grok     # Grok MCP config + agents + commands
 node src/install/cli.mjs all      # all four hosts at once
@@ -223,25 +223,15 @@ These override the global defaults for the current session only, and are enforce
 
 ### Installation
 
-Recommended to use the installer (auto-renders paths for this machine, copies the `/dsh-config`, `/dsh-status` and `/dsh-playbook` prompts):
+Use the installer to register DSH Crew MCP in the parent Codex configuration and install the `ds-flash` and `ds-pro` roles and prompts.
 
 ```bash
 node src/install/cli.mjs codex
 ```
 
-Or manually copy (requires manual path modification after copying):
+Restart Codex after installation. The roles inherit the parent session's model and MCP servers. The installer uses `$CODEX_HOME` when set and `~/.codex` otherwise. Pass `--project` to install into a trusted project's `.codex` directory.
 
-```bash
-cp codex/agents/*.toml ~/.codex/agents/    # global or project-level .codex/agents/
-```
-
-Role files come pre-configured with:
-
-- MCP server mounting configuration
-- `default_tools_approval_mode = "approve"` (**required**, otherwise tool calls are auto-cancelled in exec mode)
-- `tool_timeout_sec = 3600`
-
-**Note**: When manually copying, absolute paths in the `args` field must be updated to match actual installation location; the installer handles this automatically.
+The managed MCP entry sets `default_tools_approval_mode = "approve"` and `tool_timeout_sec = 3600` for DSH Crew. An existing user-managed DSH Crew entry is preserved. To remove a managed install, run `node src/install/cli.mjs uninstall-codex` with the same scope.
 
 ### Usage
 
@@ -413,7 +403,7 @@ This package is also a valid DSH bundle (`dsh.bundle` + `cordis.patch.yml`). Aft
   - `POST/GET /_dsh/dsh-crew/jobs`: spawn tasks, list, long-poll results, cancel
   - `GET /_dsh/dsh-crew/ping`: health check (MCP shim uses this to detect if hub is running)
   - `POST /_dsh/dsh-crew/install`: one-click install of the host integrations — Claude Code / Codex / Antigravity / Grok (backend of `src/install/`)
-- **Auto-detection**: the hosts' MCP shim auto-detects hub (`DSHPLUGIN_CREW_HUB` env var, default `http://127.0.0.1:3080`)
+- The MCP shim checks the configured Hub (default `http://127.0.0.1:3080`). On Windows, if that Hub is unavailable, it checks DSH Desktop's loopback listener and discovers its new port after a restart. Set `DSHPLUGIN_CREW_HUB` to pin a specific Hub.
   - DSH Web running → jobs enter hub mode (`mode: "hub"`)
   - Not running → fall back to standalone runtime
 
@@ -445,7 +435,7 @@ This package is also a valid DSH bundle (`dsh.bundle` + `cordis.patch.yml`). Aft
 - Codex role can theoretically try `model_provider` pointing directly to DeepSeek (unverified); this bridge doesn't depend on it
 - Image generation output is flat bitmap; layer editing requires OpenPencil
 - **Runtime dependencies**: Only `@modelcontextprotocol/sdk` and `zod`; `@deepseek-ai/*` are host runtime, provided by the DSH host (a plain npm install never pulls them)
-- **Codex must configure**: `default_tools_approval_mode = "approve"`, otherwise tool calls are auto-cancelled
+- For manual Codex setup, put the MCP server and its tool approval mode in the parent `config.toml` so subagents can inherit them.
 
 ## Develop
 
@@ -457,7 +447,7 @@ node scripts/build-client.mjs   # wraps the bundle for the DSH module loader
 node scripts/smoke.mjs          # dispatches one real flash task end to end
 ```
 
-Runtime dependencies are only `@modelcontextprotocol/sdk` and `zod`; every `@deepseek-ai/*` package is host runtime provided by the DSH host (documented in the package's dshHostRuntime field, not in peerDependencies, so a plain npm install never pulls them), which keeps the plugin inside the host's single module realm.
+Runtime dependencies are `@modelcontextprotocol/sdk`, `zod` and `smol-toml`. The DSH host provides the `@deepseek-ai/*` runtime packages listed in `dshHostRuntime`, so the plugin shares the host's module realm.
 
 ## Ecosystem
 

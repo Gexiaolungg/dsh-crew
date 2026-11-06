@@ -17,8 +17,8 @@ import { probeProvider } from '../provider-probe.mjs';
 // module realms (symbol identity mismatches in the tool runtime). Everything
 // below is either plain data or inlined logic that only touches ctx APIs.
 
-/** Inlined from @deepseek-ai/dsh-agent model-selection.ts (same semantics). */
-function installModelSelection(agentCtx, selection) {
+/** Legacy DSH hosts selected the worker model through scoped waterfalls. */
+function installLegacyModelSelection(agentCtx, selection) {
   agentCtx.on('system-prompt/assemble', async (_assembly, _cause, next) => {
     const selected = selection.current;
     const assembled = await next();
@@ -191,8 +191,10 @@ export class WorkerRegistry {
         sessionId,
         meta: { cwd: cwdPath, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
         agentOptions: { provider: selection.provider, model: selection.model },
-        setup: async (agentCtx) => {
-          installModelSelection(agentCtx, { current: selection, assembled: undefined });
+        setup: async (agentCtx, agent) => {
+          if (typeof agent?.model?.select !== 'function') {
+            installLegacyModelSelection(agentCtx, { current: selection, assembled: undefined });
+          }
           if (presets !== undefined) await presets.mount(agentCtx, presetId);
           // Nobody attends a worker session, so a question would wait forever
           // (#13). Claim this agent's requests ahead of the Web answerer.
@@ -219,6 +221,9 @@ export class WorkerRegistry {
         this.ctx.logger?.warn?.(`dsh-crew: workspace attach failed for ${cwdPath}: ${err?.message ?? err}`);
       }
       await handle.agent.whenIdle();
+      // Modern DSH fixes the entire model selection at step preparation.
+      // Record it before followup can wake the worker.
+      await handle.agent.model?.select?.(selection);
       handle.agent.followup(userMessage(task));
       await handle.agent.whenIdle();
       if (job.status !== 'needs_input') {

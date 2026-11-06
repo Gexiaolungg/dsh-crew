@@ -14,6 +14,7 @@
 // handshake: initialize -> notifications/initialized -> tools/list.
 
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, cpSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -138,14 +139,17 @@ try {
   }
   console.log('[smoke:mcp] tools/list OK: all ' + names.length + ' tools present: ' + names.join(', '));
 
-  finished = true;
-  child.kill();
-  rmSync(tmp, { recursive: true, force: true });
-  console.log('\nSMOKE PASSED: the bundled MCP server starts and serves initialize + tools/list from a node_modules-free copy.');
 } catch (err) {
+  console.error('\nSMOKE FAILED: ' + (err?.message ?? String(err)));
+  process.exitCode = 1;
+} finally {
   finished = true;
-  if (child) child.kill();
-  rmSync(tmp, { recursive: true, force: true });
-  fail(err && err.message ? err.message : String(err));
+  if (child?.exitCode === null && child.signalCode === null) {
+    const closed = once(child, 'close');
+    child.kill();
+    await closed;
+  }
+  rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
 }
+if (!process.exitCode) console.log('\nSMOKE PASSED: the bundled MCP server starts and serves initialize + tools/list from a node_modules-free copy.');
 
